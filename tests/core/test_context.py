@@ -322,8 +322,12 @@ def test_gateway_specific_adapters(copy_to_temp_path, mocker):
     ctx = Context(paths=path, config="isolated_systems_config", gateway="prod")
     assert len(ctx._engine_adapters) == 1
     assert ctx.engine_adapter == ctx._engine_adapters["prod"]
+
     with pytest.raises(SQLMeshError):
-        assert ctx._get_engine_adapter("dev")
+        assert ctx._get_engine_adapter("non_existing")
+
+    # This will create the requested engine adapter
+    assert ctx._get_engine_adapter("dev") == ctx._engine_adapters["dev"]
 
     ctx = Context(paths=path, config="isolated_systems_config")
     assert len(ctx._engine_adapters) == 1
@@ -337,8 +341,7 @@ def test_gateway_specific_adapters(copy_to_temp_path, mocker):
 
     ctx = Context(paths=path, config="isolated_systems_config")
 
-    ctx._create_engine_adapters({"test"})
-    assert len(ctx._engine_adapters) == 2
+    assert len(ctx.engine_adapters) == 3
     assert ctx.engine_adapter == ctx._get_engine_adapter()
     assert ctx._get_engine_adapter("test") == ctx._engine_adapters["test"]
 
@@ -844,9 +847,9 @@ def test_plan_default_end(sushi_context_pre_scheduling: Context):
     assert dev_plan.end is not None
     assert to_date(make_inclusive_end(dev_plan.end)) == plan_end
 
-    forward_only_dev_plan = sushi_context_pre_scheduling.plan(
-        "test_env_forward_only", no_prompts=True, include_unmodified=True, forward_only=True
-    )
+    forward_only_dev_plan = sushi_context_pre_scheduling.plan_builder(
+        "test_env_forward_only", include_unmodified=True, forward_only=True
+    ).build()
     assert forward_only_dev_plan.end is not None
     assert to_date(make_inclusive_end(forward_only_dev_plan.end)) == plan_end
     assert forward_only_dev_plan.start == plan_end
@@ -1187,6 +1190,6 @@ def test_requirements(copy_to_temp_path: t.Callable):
 
     context._requirements = {"numpy": "2.1.2", "pandas": "2.2.1"}
     context._excluded_requirements = {"ipywidgets", "ruamel.yaml", "ruamel.yaml.clib"}
-    diff = context.plan("dev", no_prompts=True, skip_tests=True, skip_backfill=True).context_diff
+    diff = context.plan_builder("dev", skip_tests=True, skip_backfill=True).build().context_diff
     assert set(diff.previous_requirements) == requirements
     assert set(diff.requirements) == {"numpy", "pandas"}

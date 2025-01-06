@@ -26,6 +26,7 @@ from sqlmesh.core.config import (
 from sqlmesh.core.context import Context, ExecutionContext
 from sqlmesh.core.dialect import parse
 from sqlmesh.core.engine_adapter.base import MERGE_SOURCE_ALIAS, MERGE_TARGET_ALIAS
+from sqlmesh.core.engine_adapter.duckdb import DuckDBEngineAdapter
 from sqlmesh.core.macros import MacroEvaluator, macro
 from sqlmesh.core.model import (
     CustomKind,
@@ -5909,6 +5910,22 @@ materialized TRUE
     )
 
 
+def test_bad_model_kind():
+    with pytest.raises(
+        SQLMeshError,
+        match=f"Model kind specified as 'BAD_KIND', but that is not a valid model kind.\n\nPlease specify one of {', '.join(ModelKindName)}.",
+    ):
+        d.parse(
+            """
+        MODEL (
+            name db.table,
+            kind BAD_KIND
+        );
+        SELECT a, b
+        """
+        )
+
+
 def test_merge_filter():
     expressions = d.parse(
         """
@@ -5944,7 +5961,7 @@ def test_merge_filter():
             merge_filter (
                 source.ds > (SELECT MAX(ds) FROM db.test) AND
                 source.ds > @start_ds AND
-                source._operation <> 1 AND 
+                source._operation <> 1 AND
                 target.start_date > dateadd(day, -7, current_date)
             )
           )
@@ -6620,3 +6637,43 @@ def test_auto_restatement():
     )
     with pytest.raises(ValueError, match="Invalid cron expression '@invalid'.*"):
         load_sql_based_model(parsed_definition)
+
+
+def test_gateway_specific_render(assert_exp_eq) -> None:
+    gateways = {
+        "main": GatewayConfig(connection=DuckDBConnectionConfig()),
+        "duckdb": GatewayConfig(connection=DuckDBConnectionConfig()),
+    }
+    config = Config(
+        gateways=gateways,
+        model_defaults=ModelDefaultsConfig(dialect="duckdb"),
+        default_gateway="main",
+    )
+    context = Context(config=config)
+    assert context.engine_adapter == context._engine_adapters["main"]
+
+    @model(
+        name="dummy_model",
+        is_sql=True,
+        kind="full",
+        gateway="duckdb",
+        grain='"x"',
+    )
+    def dummy_model_entry(evaluator: MacroEvaluator) -> exp.Select:
+        return exp.select("x").from_(exp.values([("1", 2)], "_v", ["x"]))
+
+    dummy_model = model.get_registry()["dummy_model"].model(module_path=Path("."), path=Path("."))
+    context.upsert_model(dummy_model)
+    assert isinstance(dummy_model, SqlModel)
+    assert dummy_model.gateway == "duckdb"
+
+    assert_exp_eq(
+        context.render("dummy_model"),
+        """
+        SELECT
+          "_v"."x" AS "x",
+        FROM (VALUES ('1', 2)) AS "_v"("x")
+        """,
+    )
+    assert isinstance(context._get_engine_adapter("duckdb"), DuckDBEngineAdapter)
+    assert len(context._engine_adapters) == 2
