@@ -345,6 +345,27 @@ def test_partitioned_by(
         ] == partition_by_output
 
 
+def test_opt_out_of_time_column_in_partitioned_by():
+    expressions = d.parse(
+        """
+        MODEL (
+            name db.table,
+            dialect bigquery,
+            partitioned_by b,
+            kind INCREMENTAL_BY_TIME_RANGE(
+                time_column a,
+                partition_by_time_column false
+            ),
+        );
+
+        SELECT 1::int AS a, 2::int AS b;
+    """
+    )
+
+    model = load_sql_based_model(expressions)
+    assert model.partitioned_by == [exp.to_column('"b"')]
+
+
 def test_no_model_statement(tmp_path: Path):
     # No name inference => MODEL (...) is required
     expressions = d.parse("SELECT 1 AS x")
@@ -1298,6 +1319,7 @@ def test_render_definition():
             dialect spark,
             kind INCREMENTAL_BY_TIME_RANGE (
                 time_column (`a`, 'yyyymmdd'),
+                partition_by_time_column TRUE,
                 forward_only FALSE,
                 disable_restatement FALSE,
                 on_destructive_change 'ERROR'
@@ -3001,6 +3023,42 @@ def test_incremental_unmanaged_validation():
 
     model = model.copy(update={"partitioned_by_": [exp.to_column("ds")]})
     model.validate_definition()
+
+
+def test_incremental_unmanaged():
+    expr = d.parse(
+        """
+        MODEL (
+            name foo,
+            kind INCREMENTAL_UNMANAGED
+        );
+
+        SELECT x.a AS a FROM test.x AS x
+        """
+    )
+
+    model = load_sql_based_model(expressions=expr)
+
+    assert isinstance(model.kind, IncrementalUnmanagedKind)
+    assert not model.kind.insert_overwrite
+
+    expr = d.parse(
+        """
+        MODEL (
+            name foo,
+            kind INCREMENTAL_UNMANAGED (
+                insert_overwrite true
+            ),
+            partitioned_by a
+        );
+
+        SELECT x.a AS a FROM test.x AS x
+        """
+    )
+
+    model = load_sql_based_model(expressions=expr)
+    assert isinstance(model.kind, IncrementalUnmanagedKind)
+    assert model.kind.insert_overwrite
 
 
 def test_custom_interval_unit():
@@ -6294,6 +6352,7 @@ def test_model_kind_to_expression():
         .sql()
         == """INCREMENTAL_BY_TIME_RANGE (
 time_column ("a", '%Y-%m-%d'),
+partition_by_time_column TRUE,
 forward_only FALSE,
 disable_restatement FALSE,
 on_destructive_change 'ERROR'
@@ -6324,6 +6383,7 @@ on_destructive_change 'ERROR'
         .sql()
         == """INCREMENTAL_BY_TIME_RANGE (
 time_column ("a", '%Y-%m-%d'),
+partition_by_time_column TRUE,
 batch_size 1,
 batch_concurrency 2,
 lookback 3,
@@ -7329,6 +7389,7 @@ def test_auto_restatement():
         model.kind.to_expression().sql(pretty=True)
         == """INCREMENTAL_BY_TIME_RANGE (
   time_column ("a", '%Y-%m-%d'),
+  partition_by_time_column TRUE,
   forward_only FALSE,
   disable_restatement FALSE,
   on_destructive_change 'ERROR',
@@ -7356,6 +7417,7 @@ def test_auto_restatement():
         model.kind.to_expression().sql(pretty=True)
         == """INCREMENTAL_BY_TIME_RANGE (
   time_column ("a", '%Y-%m-%d'),
+  partition_by_time_column TRUE,
   auto_restatement_intervals 1,
   forward_only FALSE,
   disable_restatement FALSE,
@@ -7943,3 +8005,21 @@ def test_seed_dont_coerce_na_into_null(tmp_path):
     assert model.seed is not None
     assert len(model.seed.content) > 0
     assert next(model.render(context=None)).to_dict() == {"code": {0: "NA"}}
+
+
+def test_missing_column_data_in_columns_key():
+    expressions = d.parse(
+        """
+        MODEL (
+            name db.seed,
+            kind SEED (
+              path '../seeds/waiter_names.csv',
+            ),
+            columns (
+              culprit, other_column double,
+            )
+        );
+    """
+    )
+    with pytest.raises(ConfigError, match="Missing data type for column 'culprit'."):
+        load_sql_based_model(expressions, path=Path("./examples/sushi/models/test_model.sql"))
